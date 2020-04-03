@@ -319,6 +319,7 @@ copy_compact(#comp_st{} = CompSt) ->
     TaskProps0 = [
         {type, database_compaction},
         {database, DbName},
+        {phase, document_copy},
         {progress, 0},
         {changes_done, 0},
         {total_changes, TotalChanges}
@@ -327,6 +328,7 @@ copy_compact(#comp_st{} = CompSt) ->
     true ->
         couch_task_status:update([
             {retry, true},
+            {phase, document_copy},
             {progress, 0},
             {changes_done, 0},
             {total_changes, TotalChanges}
@@ -503,7 +505,15 @@ copy_doc_attachments(#st{} = SrcSt, SrcSp, DstSt) ->
 
 sort_meta_data(#comp_st{new_st = St0} = CompSt) ->
     ?COMP_EVENT(md_sort_init),
-    {ok, Ems} = couch_emsort:merge(St0#st.id_tree),
+    NumMerges = couch_emsort:num_merges(St0#st.id_tree),
+    couch_task_status:update([
+        {phase, docid_sort},
+        {progress, 0},
+        {changes_done, 0},
+        {total_changes, NumMerges}
+    ]),
+    Reporter = fun update_compact_task/1,
+    {ok, Ems} = couch_emsort:merge(St0#st.id_tree, Reporter),
     ?COMP_EVENT(md_sort_done),
     CompSt#comp_st{
         new_st = St0#st{
@@ -512,7 +522,7 @@ sort_meta_data(#comp_st{new_st = St0} = CompSt) ->
     }.
 
 
-copy_meta_data(#comp_st{new_st = St} = CompSt) ->
+copy_meta_data(#comp_st{old_st = OldSt, new_st = St} = CompSt) ->
     #st{
         fd = Fd,
         header = Header,
@@ -534,12 +544,20 @@ copy_meta_data(#comp_st{new_st = St} = CompSt) ->
         locs=[]
     },
     ?COMP_EVENT(md_copy_init),
+    NumDocs = couch_bt_engine:get_doc_count(OldSt),
+    couch_task_status:update([
+        {phase, docid_copy},
+        {progress, 0},
+        {changes_done, 0},
+        {total_changes, NumDocs}
+    ]),
     Acc = merge_docids(Iter, Acc0),
     {ok, Infos} = couch_file:pread_terms(SrcFd, Acc#merge_st.locs),
     {ok, IdTree} = couch_btree:add(Acc#merge_st.id_tree, Infos),
     {ok, SeqTree} = couch_btree:add_remove(
         Acc#merge_st.seq_tree, [], Acc#merge_st.rem_seqs
     ),
+    update_compact_task(NumDocs),
     ?COMP_EVENT(md_copy_done),
     CompSt#comp_st{
         new_st = St#st{
@@ -653,8 +671,10 @@ commit_compaction_data(#st{header = OldHeader} = St0, Fd) ->
 bind_emsort(St, Fd, nil) ->
     {ok, Ems} = couch_emsort:open(Fd),
     St#st{id_tree=Ems};
+bind_emsort(St, Fd, State) when is_integer(State) ->
+    bind_emsort(St, Fd, [{root, State}]);
 bind_emsort(St, Fd, State) ->
-    {ok, Ems} = couch_emsort:open(Fd, [{root, State}]),
+    {ok, Ems} = couch_emsort:open(Fd, State),
     St#st{id_tree=Ems}.
 
 
@@ -697,6 +717,7 @@ merge_docids(Iter, #merge_st{locs=Locs}=Acc) when length(Locs) > 1000 ->
         rem_seqs=[],
         locs=[]
     },
+    update_compact_task(length(Locs)),
     merge_docids(Iter, Acc1);
 merge_docids(Iter, #merge_st{curr=Curr}=Acc) ->
     case next_info(Iter, Curr, []) of
