@@ -50,7 +50,8 @@
     chunks_sent = 0,
     buffer = [],
     bufsize = 0,
-    threshold
+    threshold,
+    request
 }).
 
 -define(IS_ALL_DOCS(T), (
@@ -131,8 +132,9 @@ handle_changes_req_tx(#httpd{}=Req, Db) ->
 
 % callbacks for continuous feed (newline-delimited JSON Objects)
 changes_callback(start, #cacc{feed = continuous} = Acc) ->
-    {ok, Resp} = chttpd:start_delayed_json_response(Acc#cacc.mochi, 200),
-    {ok, Acc#cacc{mochi = Resp, responding = true}};
+    Req = Acc#cacc.mochi,
+    {ok, Resp} = chttpd:start_delayed_json_response(Req, 200),
+    {ok, Acc#cacc{mochi = Resp, responding = true, request=Req}};
 changes_callback({change, Change}, #cacc{feed = continuous} = Acc) ->
     chttpd_stats:incr_rows(),
     Data = [?JSON_ENCODE(Change) | "\n"],
@@ -156,7 +158,7 @@ changes_callback(start, #cacc{feed = eventsource} = Acc) ->
         {"Cache-Control", "no-cache"}
     ],
     {ok, Resp} = chttpd:start_delayed_json_response(Req, 200, Headers),
-    {ok, Acc#cacc{mochi = Resp, responding = true}};
+    {ok, Acc#cacc{mochi = Resp, responding = true, request = Req}};
 changes_callback({change, {ChangeProp}=Change}, #cacc{feed = eventsource} = Acc) ->
     chttpd_stats:incr_rows(),
     Seq = proplists:get_value(seq, ChangeProp),
@@ -183,12 +185,12 @@ changes_callback(start, #cacc{feed = normal} = Acc) ->
     FirstChunk = "{\"results\":[\n",
     {ok, Resp} = chttpd:start_delayed_json_response(Req, 200,
         [{"ETag",Etag}], FirstChunk),
-    {ok, Acc#cacc{mochi = Resp, responding = true}};
+    {ok, Acc#cacc{mochi = Resp, responding = true, request=Req}};
 changes_callback(start, Acc) ->
     #cacc{mochi = Req} = Acc,
     FirstChunk = "{\"results\":[\n",
     {ok, Resp} = chttpd:start_delayed_json_response(Req, 200, [], FirstChunk),
-    {ok, Acc#cacc{mochi = Resp, responding = true}};
+    {ok, Acc#cacc{mochi = Resp, responding = true, request=Req}};
 changes_callback({change, Change}, Acc) ->
     chttpd_stats:incr_rows(),
     Data = [Acc#cacc.prepend, ?JSON_ENCODE(Change)],
@@ -239,8 +241,10 @@ changes_callback({error, Reason}, Acc) ->
 
 maybe_flush_changes_feed(#cacc{bufsize=Size, threshold=Max} = Acc, Data, Len)
          when Size > 0 andalso (Size + Len) > Max ->
-    #cacc{buffer = Buffer, mochi = Resp} = Acc,
+    #cacc{buffer = Buffer, mochi = Resp, request = Req} = Acc,
     {ok, R1} = chttpd:send_delayed_chunk(Resp, Buffer),
+    chttpd_stats:report(Req, Resp),
+    chttpd_stats:reset_after_reporting(),
     {ok, Acc#cacc{prepend = ",\r\n", buffer = Data, bufsize=Len, mochi = R1}};
 maybe_flush_changes_feed(Acc0, Data, Len) ->
     #cacc{buffer = Buf, bufsize = Size, chunks_sent = ChunksSent} = Acc0,

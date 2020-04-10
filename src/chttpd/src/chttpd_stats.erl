@@ -24,7 +24,9 @@
     incr_writes/1,
 
     incr_rows/0,
-    incr_rows/1
+    incr_rows/1,
+
+    reset_after_report/0
 ]).
 
 
@@ -105,3 +107,11 @@ incr(Idx, Count) ->
         _ ->
             ok
     end.
+
+
+reset_after_report() ->
+    put(?KEY, #st{
+        reads = 0,
+        writes = 0,
+        rows = 0
+    }).
