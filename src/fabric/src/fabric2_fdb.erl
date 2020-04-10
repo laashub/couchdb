@@ -235,6 +235,7 @@ create(#{} = Db0, Options) ->
         validate_doc_update_funs => [],
         before_doc_update => undefined,
         after_doc_read => undefined,
+        binary_chunk_size => binary_chunk_size(),
         % All other db things as we add features,
 
         db_options => Options1
@@ -278,6 +279,7 @@ open(#{} = Db0, Options) ->
         validate_doc_update_funs => [],
         before_doc_update => undefined,
         after_doc_read => undefined,
+        binary_chunk_size => binary_chunk_size(),
 
         db_options => Options2
     },
@@ -996,7 +998,8 @@ write_attachment(#{} = Db, DocId, Data, Encoding)
         when is_binary(Data), is_atom(Encoding) ->
     #{
         tx := Tx,
-        db_prefix := DbPrefix
+        db_prefix := DbPrefix,
+        binary_chunk_size := BinaryChunkSize
     } = ensure_current(Db),
 
     AttId = fabric2_util:uuid(),
@@ -1017,7 +1020,7 @@ write_attachment(#{} = Db, DocId, Data, Encoding)
     InfoVal = erlfdb_tuple:pack({?CURR_ATT_STORAGE_VER, Compressed}),
     ok = erlfdb:set(Tx, IdKey, InfoVal),
 
-    Chunks = chunkify_binary(Data1),
+    Chunks = chunkify_binary(Data1, BinaryChunkSize),
 
     lists:foldl(fun(Chunk, ChunkId) ->
         AttKey = erlfdb_tuple:pack({?DB_ATTS, DocId, AttId, ChunkId}, DbPrefix),
@@ -1488,7 +1491,8 @@ fdb_to_revinfo(Key, {1, RPath, AttHash}) ->
 
 doc_to_fdb(Db, #doc{} = Doc) ->
     #{
-        db_prefix := DbPrefix
+        db_prefix := DbPrefix,
+        binary_chunk_size := BinaryChunkSize
     } = Db,
 
     #doc{
@@ -1503,7 +1507,7 @@ doc_to_fdb(Db, #doc{} = Doc) ->
 
     Opts = [{minor_version, 1}, {compressed, 6}],
     Value = term_to_binary({Body, DiskAtts, Deleted}, Opts),
-    Chunks = chunkify_binary(Value),
+    Chunks = chunkify_binary(Value, BinaryChunkSize),
 
     {Rows, _} = lists:mapfoldl(fun(Chunk, ChunkId) ->
         Key = erlfdb_tuple:pack({?DB_DOCS, Id, Start, Rev, ChunkId}, DbPrefix),
@@ -1538,7 +1542,8 @@ fdb_to_doc(Db, DocId, Pos, Path, BinRows) when is_list(BinRows) ->
 
 local_doc_to_fdb(Db, #doc{} = Doc) ->
     #{
-        db_prefix := DbPrefix
+        db_prefix := DbPrefix,
+        binary_chunk_size := BinaryChunkSize
     } = Db,
 
     #doc{
@@ -1558,7 +1563,7 @@ local_doc_to_fdb(Db, #doc{} = Doc) ->
     {Rows, _} = lists:mapfoldl(fun(Chunk, ChunkId) ->
         K = erlfdb_tuple:pack({?DB_LOCAL_DOC_BODIES, Id, ChunkId}, DbPrefix),
         {{K, Chunk}, ChunkId + 1}
-    end, 0, chunkify_binary(BVal)),
+    end, 0, chunkify_binary(BVal, BinaryChunkSize)),
 
     NewSize = fabric2_util:ldoc_size(Doc),
     RawValue = erlfdb_tuple:pack({?CURR_LDOC_FORMAT, StoreRev, NewSize}),
@@ -1627,13 +1632,14 @@ sum_rem_rev_sizes(RevInfos) ->
     end, 0, RevInfos).
 
 
-chunkify_binary(Data) ->
+chunkify_binary(Data, Size) ->
+    couch_log:info("chunkify_binary ~p", [Size]),
     case Data of
         <<>> ->
             [];
-        <<Head:?BINARY_CHUNK_SIZE/binary, Rest/binary>> ->
-            [Head | chunkify_binary(Rest)];
-        <<_/binary>> when size(Data) < ?BINARY_CHUNK_SIZE ->
+        <<Head:Size/binary, Rest/binary>> ->
+            [Head | chunkify_binary(Rest, Size)];
+        <<_/binary>> when size(Data) < Size ->
             [Data]
     end.
 
@@ -1986,6 +1992,11 @@ get_info_wait_int(#info_future{} = InfoFuture) ->
     end, [{sizes, {[]}}], erlfdb:wait(MetaFuture)),
 
     [CProp | MProps].
+
+
+binary_chunk_size() ->
+    config:get_integer(
+        "fabric", "binary_chunk_size", ?DEFAULT_BINARY_CHUNK_SIZE).
 
 
 -ifdef(TEST).
