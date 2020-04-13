@@ -66,7 +66,7 @@ teardown(#{pid := Pid}) ->
 
 
 simple_lifecycle(_) ->
-    ?_test(begin
+    {timeout, 10, ?_test(begin
         Now = erlang:system_time(?TIME_UNIT),
         StaleTS = Now + 100,
         ExpiresTS = Now + 200,
@@ -93,7 +93,7 @@ simple_lifecycle(_) ->
         ok = wait_lookup(Name, Key, not_found),
         ?assertEqual([], entries(Name)),
         ?assertEqual(not_found, couch_expiring_cache:lookup(Name, Key))
-    end).
+    end)}.
 
 
 entries(Name) ->
